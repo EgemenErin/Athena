@@ -1,36 +1,21 @@
-
-"""
-llm_engine.py
--------------
-Core LLM logic for the data chatbot — Ollama local backend.
-Handles schema building, code generation, sandboxed execution,
-and narrative summarisation.
-
-Requirements:
-    pip install ollama pandas
-    ollama pull qwen2.5-coder:7b
-"""
-
 import re
 import traceback
 import ollama
 import pandas as pd
 
-# ── Config ─────────────────────────────────────────────────────────────────────
+MODEL = "qwen2.5-coder:7b"
+MAX_RETRIES = 1
 
-MODEL = "qwen2.5-coder:7b"   # fits in 8GB VRAM; swap to :14b if you want more power
-MAX_RETRIES = 1               # one automatic fix attempt on code error
 
-# ── Schema builder ──────────────────────────────────────────────────────────────
+def _numeric_columns(df: pd.DataFrame) -> list[str]:
+    return [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c].dtype)]
+
+
+def _categorical_columns(df: pd.DataFrame) -> list[str]:
+    return [c for c in df.columns if not pd.api.types.is_numeric_dtype(df[c].dtype)]
+
 
 def build_schema_string(df: pd.DataFrame, max_values: int = 10) -> str:
-    """
-    Produces a compact schema description of the DataFrame to inject
-    into the system prompt so the model knows exactly what columns exist.
-
-    Numeric columns  → show min/max range + null count
-    Categorical cols → show sample unique values + null count
-    """
     lines = [f"Shape: {df.shape[0]:,} rows × {df.shape[1]} columns\n"]
 
     for col in df.columns:
@@ -56,9 +41,6 @@ def build_schema_string(df: pd.DataFrame, max_values: int = 10) -> str:
             )
 
     return "\n".join(lines)
-
-
-# ── System prompt ───────────────────────────────────────────────────────────────
 
 def build_system_prompt(schema: str) -> str:
     return f"""You are a data analyst assistant. You have access to a pandas DataFrame called `df`.
@@ -131,6 +113,47 @@ def run_code(code: str, df: pd.DataFrame) -> tuple:
         return None, traceback.format_exc()
 
 
+def _friendly_execution_error(error: str, df: pd.DataFrame) -> str:
+    """Convert noisy pandas tracebacks into clear user-facing hints."""
+    missing_col = re.search(r"KeyError: ['\"]([^'\"]+)['\"]", error)
+    if missing_col:
+        requested = missing_col.group(1)
+        sample = ", ".join(df.columns[:12])
+        if len(df.columns) > 12:
+            sample += ", ..."
+        return (
+            f"Column '{requested}' was not found in the dataset. "
+            f"Use exact column names from the schema. "
+            f"Example available columns: {sample}"
+        )
+
+    numeric_cols = _numeric_columns(df)
+    categorical_cols = _categorical_columns(df)
+    numeric_hint = ", ".join(numeric_cols[:8]) if numeric_cols else "no numeric columns detected"
+    group_hint = ", ".join(categorical_cols[:8]) if categorical_cols else "no categorical columns detected"
+
+    if "does not support operation 'mean'" in error and "dtype 'str'" in error:
+        return (
+            "Tried to calculate an average on text values. "
+            f"Use a numeric column for mean/avg. Numeric examples: {numeric_hint}. "
+            f"Group-by examples: {group_hint}."
+        )
+
+    unsupported_reduce = re.search(
+        r"Cannot perform reduction '([^']+)' with string dtype",
+        error,
+    )
+    if unsupported_reduce:
+        op = unsupported_reduce.group(1)
+        return (
+            f"Tried to run `{op}` on text values. "
+            f"Use a numeric column for `{op}`. Numeric examples: {numeric_hint}. "
+            f"If grouping, use text columns only as group keys (e.g. {group_hint})."
+        )
+
+    return error
+
+
 # ── Core generation + retry loop ────────────────────────────────────────────────
 
 def generate_and_run(
@@ -155,6 +178,8 @@ def generate_and_run(
     """
     system_prompt = build_system_prompt(schema)
     history = chat_history or []
+    numeric_hint = ", ".join(_numeric_columns(df)[:12]) or "none"
+    categorical_hint = ", ".join(_categorical_columns(df)[:12]) or "none"
 
     messages = (
         [{"role": "system", "content": system_prompt}]
@@ -185,7 +210,12 @@ def generate_and_run(
                 "role": "user",
                 "content": (
                     f"That code raised an error:\n\n{error}\n\n"
-                    "Fix it and return only the corrected ```python block."
+                    "Fix it and return only the corrected ```python block.\n\n"
+                    "Important constraints:\n"
+                    f"- Numeric columns likely to aggregate: {numeric_hint}\n"
+                    f"- Non-numeric/grouping columns: {categorical_hint}\n"
+                    "- Never run mean/median/sum/min/max on string columns.\n"
+                    "- If a requested column doesn't exist, pick the closest valid column from schema."
                 ),
             },
         ]
@@ -194,6 +224,9 @@ def generate_and_run(
         code = extract_code(raw)
         if code:
             result, error = run_code(code, df)
+
+    if error:
+        error = _friendly_execution_error(error, df)
 
     return {
         "code": code,
@@ -204,6 +237,91 @@ def generate_and_run(
 
 
 # ── Narrative summariser ─────────────────────────────────────────────────────────
+
+
+
+
+
+def _fallback_suggestions(df: pd.DataFrame, n: int = 5) -> list[str]:
+    numeric = _numeric_columns(df)
+    categorical = _categorical_columns(df)
+    out: list[str] = []
+
+    if categorical:
+        out.append(f"What are the top 10 most common values in '{categorical[0]}'?")
+    if len(categorical) > 1:
+        out.append(f"How many unique values does '{categorical[1]}' have?")
+    if numeric:
+        out.append(f"What is the average, min, and max of '{numeric[0]}'?")
+    if numeric and categorical:
+        out.append(
+            f"Show average '{numeric[0]}' grouped by '{categorical[0]}' (top 10)."
+        )
+    if numeric:
+        out.append(f"Which rows have the highest '{numeric[0]}'?")
+
+    generic = [
+        "How many rows are in the dataset?",
+        "Which columns have the most missing values?",
+    ]
+    for q in generic:
+        if len(out) >= n:
+            break
+        if q not in out:
+            out.append(q)
+    return out[:n]
+
+
+def _parse_question_list(raw: str, n: int) -> list[str]:
+    questions: list[str] = []
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        cleaned = re.sub(r"^[-*]\s*", "", line)
+        cleaned = re.sub(r"^\d+[\.\):]\s*", "", cleaned)
+        cleaned = cleaned.strip(chr(34) + chr(39))
+        if len(cleaned) > 12:
+            questions.append(cleaned if cleaned.endswith("?") else cleaned + "?")
+    return questions[:n]
+
+
+def generate_suggested_questions(
+    df: pd.DataFrame,
+    schema: str,
+    n: int = 5,
+) -> list[str]:
+    """Dataset-specific question suggestions via Ollama."""
+    numeric = _numeric_columns(df)[:12]
+    categorical = _categorical_columns(df)[:12]
+    schema_excerpt = schema if len(schema) <= 5000 else schema[:5000] + "\n... (truncated)"
+
+    prompt = (
+        f"Dataset: {df.shape[0]:,} rows, {df.shape[1]} columns.\n"
+        f"Numeric columns: {', '.join(numeric) or 'none'}\n"
+        f"Category columns: {', '.join(categorical) or 'none'}\n\n"
+        f"Schema:\n{schema_excerpt}\n\n"
+        f"Write exactly {n} short plain-English questions answerable with pandas on this data. "
+        "Use real column names from the schema. Mix top-N, averages, counts, and comparisons.\n"
+        "Numbered list only, no preamble:\n"
+        "1. ...\n2. ..."
+    )
+
+    try:
+        response = ollama.chat(
+            model=MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            options={"temperature": 0.65, "num_predict": 400},
+        )
+        parsed = _parse_question_list(response["message"]["content"].strip(), n)
+        if len(parsed) >= max(3, n // 2):
+            return parsed[:n]
+    except Exception:
+        pass
+
+    return _fallback_suggestions(df, n)
+
+
 
 def summarise_result(question: str, result) -> str:
     """
