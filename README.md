@@ -272,7 +272,7 @@ This project is licensed under the **MIT License** — see the [LICENSE](LICENSE
 
 - GitHub: [@EgemenErin](https://github.com/EgemenErin)
 - Repository: [github.com/EgemenErin/Iroh](https://github.com/EgemenErin/Iroh)
-- Email: egemeneriin@icloud.com *(optional — update or remove if you prefer issues-only contact)*
+- Email: egemeneriin@protonmail.com 
 
 Questions, bugs, and feature requests: please use [GitHub Issues](https://github.com/EgemenErin/Iroh/issues).
 
