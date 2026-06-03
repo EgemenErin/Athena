@@ -125,6 +125,13 @@ html, body, [class*="css"] {
     line-height: 1.4;
 }
 
+.chart-desc {
+    font-size: 0.84rem;
+    color: var(--muted);
+    line-height: 1.45;
+    margin: 0.15rem 0 0.65rem 0;
+}
+
 [data-testid="stChatMessage"] {
     background: var(--surface);
     border: 1px solid var(--border);

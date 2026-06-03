@@ -1,4 +1,7 @@
 streamlit>=1.58
 pandas>=2.0
 plotly>=6.0
+kaleido>=0.2
+reportlab>=4.0
 ollama>=0.6
+pytest>=8.0

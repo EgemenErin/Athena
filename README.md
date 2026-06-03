@@ -25,9 +25,13 @@ The project exists to close the gap between “I have a CSV” and “I have an 
 - **Local-first privacy** — Powered by Ollama (`qwen2.5-coder:7b` by default); no external LLM API required.
 - **Sandboxed execution** — Generated code runs in an isolated scope with only `df` and `pd` available.
 - **Smart recovery** — Automatic retry with schema-aware hints when generated code fails.
-- **AI-suggested questions** — Sidebar prompts tailored to your dataset’s columns and types.
-- **Rich responses** — DataFrames, scalar metrics, Plotly bar charts, and short narrative insights.
+- **Senior analyst prompts** — Code generation follows strict column mapping, question-type rules, and survey-style data patterns (semicolon lists, filters).
+- **Agent pipeline (local)** — Optional Planner → Analyst → Reviewer flow for better answers; toggle in `athena/config.py`.
+- **AI-suggested questions** — Business-analyst-style sidebar prompts tied to real columns.
+- **Dashboard** — AI-suggested graphs (bar, histogram, scatter, line, pie) with live Plotly previews; **Make a chart** builder with column pickers and heuristic chart suggestions; save charts to **My charts**; export saved charts to PDF (2×2 per page). Handles numeric text (coerce), high-cardinality metrics (bins), and list-like columns (explode `;`-separated values).
+- **Rich responses** — DataFrames, scalar metrics, Plotly bar charts (only when appropriate), and grounded narrative insights.
 - **Multi-turn chat** — Follow-up questions retain conversation context for chained analysis.
+- **AI-assisted cleaning** — Per-column analysis (no action cap): AI reviews every column in batches and recommends drop, fill (median/mean/mode), outlier handling, or skip; apply what you approve, with undo.
 
 ---
 
@@ -54,11 +58,20 @@ Iroh/
 │   │   ├── execution.py
 │   │   ├── generator.py
 │   │   ├── suggestions.py
+│   │   ├── chart_suggestions.py
+│   │   ├── cleaning.py
+│   │   ├── agents.py
+│   │   ├── personas.py
 │   │   └── summary.py
 │   └── ui/                # Styles, sidebar, chat views
 │       ├── styles.py
 │       ├── sidebar.py
+│       ├── cleaning.py
+│       ├── dashboard.py
+│       ├── pdf_export.py
 │       └── main.py
+├── tests/
+│   └── test_cleaning.py
 └── README.md
 ```
 
@@ -116,6 +129,8 @@ Athena does **not** require a `.env` file out of the box. Configuration is in co
 |--------------------|----------|-------------|
 | `MODEL` | `athena/config.py` | Ollama model name (default: `qwen2.5-coder:7b`) |
 | `MAX_RETRIES` | `athena/config.py` | Automatic fix attempts on execution errors (default: `1`) |
+| `ENABLE_AGENT_PIPELINE` | `athena/config.py` | Planner + Reviewer before/after codegen (default: `True`) |
+| `MAX_REVIEW_RETRIES` | `athena/config.py` | Reviewer-driven codegen retries when result mismatches question (default: `1`) |
 
 Optional future additions (placeholders if you extend the project):
 
@@ -145,6 +160,13 @@ python -m athena.llm.generator
 
 This runs a small in-memory DataFrame through code generation and execution against Ollama.
 
+Cleaning executor smoke test (no Ollama):
+
+```bash
+python -m athena.llm.cleaning
+pytest tests/test_cleaning.py
+```
+
 ---
 
 ## 💡 Usage
@@ -152,14 +174,28 @@ This runs a small in-memory DataFrame through code generation and execution agai
 ### Web UI workflow
 
 1. **Upload** — In the sidebar, drop a `.csv` file (surveys, sales, logs, exports, etc.).
-2. **Explore** — Review row/column stats and column types, or click a **Suggested question**.
-3. **Ask** — Type a question in the chat, e.g.:
+2. **Clean (optional)** — **Clean data** tab → **Analyze with AI** walks **every column** (120 columns = 120 recommendations, batched LLM calls). Review per-column actions (drop, fill strategy, outliers, or skip), apply selected, or use **Fill all missing → 0%** for a one-shot null fix. **Download cleaned CSV** when ready.
+3. **Dashboard** — Open **Dashboard** for AI-suggested charts (bar, histogram, scatter, line, pie) rendered as live Plotly previews. Use **↻ Refresh** for new ideas (Ollama when available, rule-based fallback otherwise).
+4. **Explore** — Review row/column stats and column types, or click a **Suggested question** in the sidebar.
+5. **Ask** — Type a question in the chat, e.g.:
    - *What are the top 10 countries by median yearly compensation?*
    - *How many rows have missing values in the `email` column?*
    - *Show average `score` grouped by `region`.*
-4. **Inspect** — Read the narrative insight, table or chart, and expand **View generated code** to see the pandas logic.
+6. **Inspect** — Read the narrative insight, table or chart, and expand **View generated code** to see the pandas logic.
 
 Follow-up questions work in context (e.g. *“Now filter that to Europe only”*).
+
+### Agent pipeline
+
+When `ENABLE_AGENT_PIPELINE` is `True` (default), each chat question runs:
+
+1. **Planner** — picks columns, filters, and expected result shape (count vs table vs correlation).
+2. **Senior Analyst** — writes pandas code using the plan and analyst rules.
+3. **Reviewer** — checks if the result answers the question; triggers one retry if not.
+
+Set `ENABLE_AGENT_PIPELINE = False` in [`athena/config.py`](athena/config.py) for faster responses with a single model call.
+
+Charts are shown only for suitable results (e.g. category + metric tables), not for correlation matrices or scalars.
 
 ### Example questions
 

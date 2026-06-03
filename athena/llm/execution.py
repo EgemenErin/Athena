@@ -3,7 +3,7 @@ import traceback
 
 import pandas as pd
 
-from athena.llm.schema import categorical_columns, numeric_columns
+from athena.llm.schema import categorical_columns, coerce_numeric_like_columns, numeric_columns
 
 
 def extract_code(response_text: str) -> str | None:
@@ -26,7 +26,7 @@ def run_code(code: str, df: pd.DataFrame) -> tuple:
     Only `df` and `pd` are available — nothing else.
     Returns (result, error_string).
     """
-    sandbox = {"df": df.copy(), "pd": pd}
+    sandbox = {"df": coerce_numeric_like_columns(df), "pd": pd}
     try:
         exec(code, sandbox)  # noqa: S102
         result = sandbox.get("result", None)
@@ -73,6 +73,25 @@ def friendly_execution_error(error: str, df: pd.DataFrame) -> str:
             f"Tried to run `{op}` on text values. "
             f"Use a numeric column for `{op}`. Numeric examples: {numeric_hint}. "
             f"If grouping, use text columns only as group keys (e.g. {group_hint})."
+        )
+
+    if "Invalid comparison between dtype=str" in error or "Invalid comparison between dtype=string" in error:
+        return (
+            "Tried to compare a text column to a number. "
+            f"Use pd.to_numeric(df['column'], errors='coerce') before filtering, or pick a numeric column. "
+            f"Numeric examples: {numeric_hint}."
+        )
+
+    if "ArrowNotImplementedError" in error and "greater" in error:
+        return (
+            "Tried to compare a text column to a number. "
+            f"Coerce with pd.to_numeric(..., errors='coerce') first, or use: {numeric_hint}."
+        )
+
+    if "has no attribute 'append'" in error:
+        return (
+            "Generated code used DataFrame.append(), which is not supported in this pandas version. "
+            "Use pd.concat([df1, df2], ignore_index=True) to combine tables instead."
         )
 
     return error

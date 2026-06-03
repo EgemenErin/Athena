@@ -1,24 +1,13 @@
+from athena.llm.personas import SENIOR_ANALYST_RULES
+
+
 def build_system_prompt(schema: str) -> str:
-    return f"""You are a data analyst assistant. You have access to a pandas DataFrame called `df`.
+    return f"""{SENIOR_ANALYST_RULES}
 
 Here is the schema of `df`:
 {schema}
 
-When the user asks a question about the data, respond with ONLY a Python code block.
-
-Rules:
-- Use ONLY `df` and `pd` — both are already available, do not import anything
-- Assign the final answer to a variable called `result`
-- `result` must be a DataFrame, a Series, or a scalar (int / float / str)
-- Do NOT use print(), display(), or any output functions
-- Do NOT import any libraries
-- When filtering rows, always use .copy() to avoid SettingWithCopyWarning
-- For "top N" questions return a sorted DataFrame or Series
-- For single-number answers (count, mean, max) assign the scalar directly
-
-Respond with ONLY the code block and nothing else — no explanation, no preamble.
-
-Example:
+Example (grouped aggregation):
 ```python
 result = (
     df[df["ConvertedCompYearly"] > 0]
@@ -26,6 +15,26 @@ result = (
     .median()
     .sort_values(ascending=False)
     .head(10)
+    .reset_index()
 )
+```
+
+Example (count distinct after filter):
+```python
+subset = df[df["LearnCode"].str.contains("Books", case=False, na=False)]
+activities = subset["CodingActivities"].dropna().str.split(";").explode().str.strip()
+result = activities.nunique()
+```
+
+Example (compare groups — use concat, never append):
+```python
+masters = df[df["EdLevel"].str.contains("master", case=False, na=False)]
+bachelors = df[df["EdLevel"].str.contains("bachelor", case=False, na=False)]
+m_act = masters["CodingActivities"].dropna().str.split(";").explode().str.strip().value_counts()
+b_act = bachelors["CodingActivities"].dropna().str.split(";").explode().str.strip().value_counts()
+result = pd.concat(
+    [m_act.head(10).rename("masters"), b_act.head(10).rename("bachelors")],
+    axis=1,
+).fillna(0)
 ```
 """

@@ -18,7 +18,7 @@ def render_landing() -> None:
         unsafe_allow_html=True,
     )
 
-    c1, c2, c3 = st.columns(3)
+    c1, c2, c3, c4 = st.columns(4)
     with c1:
         st.markdown(
             """
@@ -35,8 +35,8 @@ def render_landing() -> None:
             """
             <div class="step-card">
                 <div class="step-num">2</div>
-                <h3>Ask</h3>
-                <p>Type a question or pick an AI-suggested prompt matched to your columns.</p>
+                <h3>Clean</h3>
+                <p>Open <strong>Clean data</strong> — AI suggests fixes; download a cleaned CSV when done.</p>
             </div>
             """,
             unsafe_allow_html=True,
@@ -46,8 +46,19 @@ def render_landing() -> None:
             """
             <div class="step-card">
                 <div class="step-num">3</div>
-                <h3>Explore</h3>
-                <p>Get tables, charts, and a short narrative insight for every answer.</p>
+                <h3>Dashboard</h3>
+                <p>Open <strong>Dashboard</strong> — suggested graphs tailored to your columns.</p>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    with c4:
+        st.markdown(
+            """
+            <div class="step-card">
+                <div class="step-num">4</div>
+                <h3>Chat</h3>
+                <p>Ask questions or use sidebar prompts — tables, charts, and narrative insights.</p>
             </div>
             """,
             unsafe_allow_html=True,
@@ -67,6 +78,8 @@ def _render_message(msg: dict) -> None:
                 f'<div class="insight-box">{msg["narrative"]}</div>',
                 unsafe_allow_html=True,
             )
+        if msg.get("plan_summary"):
+            st.caption(f"Analysis plan used columns: {msg['plan_summary']}")
         if msg.get("result_df") is not None:
             st.dataframe(msg["result_df"], use_container_width=True)
         if msg.get("chart") is not None:
@@ -106,6 +119,7 @@ def _handle_question(question: str) -> None:
             "chart": None,
             "scalar": None,
             "narrative": None,
+            "plan_summary": output.get("plan_summary"),
         }
 
         if error:
@@ -118,6 +132,8 @@ def _handle_question(question: str) -> None:
                 unsafe_allow_html=True,
             )
             msg_data["narrative"] = narrative
+            if output.get("plan_summary"):
+                st.caption(f"Analysis plan used columns: {output['plan_summary']}")
 
             if isinstance(result, pd.DataFrame):
                 st.dataframe(result, use_container_width=True)

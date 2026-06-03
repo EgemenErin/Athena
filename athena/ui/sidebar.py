@@ -7,7 +7,7 @@ def render_sidebar() -> None:
     with st.sidebar:
         st.markdown('<p class="brand-title">Athena</p>', unsafe_allow_html=True)
         st.markdown(
-            '<p class="brand-sub">Ask your CSV anything — runs locally via Ollama.</p>',
+            '<p class="brand-sub">Upload once — clean, dashboard, and chat.</p>',
             unsafe_allow_html=True,
         )
 
@@ -29,15 +29,17 @@ def render_sidebar() -> None:
 
         if uploaded:
             try:
-                load_csv_upload(uploaded)
-                st.success(f"Loaded **{uploaded.name}**")
+                if load_csv_upload(uploaded):
+                    st.success(f"Loaded **{uploaded.name}**")
             except Exception as e:
                 st.error(f"Could not read file: {e}")
 
         if st.session_state.df is not None:
             df = st.session_state.df
-            st.markdown('<p class="section-label">Overview</p>', unsafe_allow_html=True)
+            st.markdown('<p class="section-label">Dataset</p>', unsafe_allow_html=True)
             render_stat_cards(df)
+            if st.session_state.cleaning_applied:
+                st.caption("Cleaned — use **Clean data** tab to download.")
 
             with st.expander("All columns", expanded=False):
                 for col in df.columns:
@@ -54,7 +56,7 @@ def render_sidebar() -> None:
                 unsafe_allow_html=True,
             )
             st.markdown(
-                '<p class="suggest-hint">Tailored to your columns — click to ask, or refresh for new ideas.</p>',
+                '<p class="suggest-hint">For the **Chat** tab — click to prefill.</p>',
                 unsafe_allow_html=True,
             )
 
@@ -76,7 +78,7 @@ def render_sidebar() -> None:
             )
 
             if need_generate:
-                with st.spinner("Generating ideas for this dataset…"):
+                with st.spinner("Generating ideas…"):
                     suggestions = load_suggestions(force=True)
             else:
                 suggestions = st.session_state.suggestions or []
@@ -84,6 +86,8 @@ def render_sidebar() -> None:
             for i, s in enumerate(suggestions):
                 if st.button(s, key=f"sug_{i}_{hash(s) % 10**6}", use_container_width=True):
                     st.session_state["_prefill"] = s
+                    st.session_state.active_tab = "Chat"
+                    st.rerun()
 
             st.markdown("---")
             if st.button("Clear conversation", use_container_width=True, type="secondary"):

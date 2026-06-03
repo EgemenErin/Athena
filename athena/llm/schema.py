@@ -6,7 +6,40 @@ def numeric_columns(df: pd.DataFrame) -> list[str]:
 
 
 def categorical_columns(df: pd.DataFrame) -> list[str]:
-    return [c for c in df.columns if not pd.api.types.is_numeric_dtype(df[c].dtype)]
+    return [c for c in df.columns if c not in numeric_columns(df)]
+
+
+def looks_numeric_string(series: pd.Series, sample_size: int = 100) -> bool:
+    """True when a text column's values are mostly parseable as numbers."""
+    if pd.api.types.is_numeric_dtype(series.dtype):
+        return False
+    sample = series.dropna().head(sample_size)
+    if len(sample) == 0:
+        return False
+    converted = pd.to_numeric(sample.astype(str), errors="coerce")
+    return converted.notna().mean() >= 0.8
+
+
+def coerce_numeric_like_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Parse numeric-like text columns so comparisons and aggregates work."""
+    out = df.copy()
+    for col in out.columns:
+        if pd.api.types.is_numeric_dtype(out[col].dtype):
+            continue
+        if looks_numeric_string(out[col]):
+            out[col] = pd.to_numeric(out[col].astype(str), errors="coerce")
+    return out
+
+
+def comparable_numeric_columns(df: pd.DataFrame) -> list[str]:
+    """Columns safe for >, <, mean, etc. (native numeric or numeric-like text)."""
+    out: list[str] = []
+    for col in df.columns:
+        if pd.api.types.is_numeric_dtype(df[col].dtype):
+            out.append(col)
+        elif looks_numeric_string(df[col]):
+            out.append(col)
+    return out
 
 
 def build_schema_string(df: pd.DataFrame, max_values: int = 10) -> str:
@@ -20,7 +53,15 @@ def build_schema_string(df: pd.DataFrame, max_values: int = 10) -> str:
             col_min = df[col].min()
             col_max = df[col].max()
             lines.append(
-                f"Column: '{col}'  dtype: {dtype}\n"
+                f"Column: '{col}'  dtype: {dtype} (numeric)\n"
+                f"  range: {col_min} – {col_max}  |  nulls: {null_count}"
+            )
+        elif looks_numeric_string(df[col]):
+            converted = pd.to_numeric(df[col].astype(str), errors="coerce")
+            col_min = converted.min()
+            col_max = converted.max()
+            lines.append(
+                f"Column: '{col}'  dtype: {dtype} (numeric-like text — use pd.to_numeric before math)\n"
                 f"  range: {col_min} – {col_max}  |  nulls: {null_count}"
             )
         else:
@@ -34,4 +75,16 @@ def build_schema_string(df: pd.DataFrame, max_values: int = 10) -> str:
                 f"  sample values: {sample_str}  |  nulls: {null_count}"
             )
 
+    return "\n".join(lines)
+
+
+def build_column_index(df: pd.DataFrame, max_per_line: int = 8) -> str:
+    """Compact list of all column names for suggestion prompts."""
+    cols = list(df.columns)
+    if not cols:
+        return "Available columns: (none)"
+    lines = ["Available columns — every question must use at least one exact name in backticks:"]
+    for i in range(0, len(cols), max_per_line):
+        chunk = cols[i : i + max_per_line]
+        lines.append(", ".join(f"`{c}`" for c in chunk))
     return "\n".join(lines)
