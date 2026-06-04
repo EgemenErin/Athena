@@ -11,6 +11,13 @@ Repository: [github.com/EgemenErin/Athena](https://github.com/EgemenErin/Athena)
 
 ---
 
+<img width="1851" height="931" alt="image" src="https://github.com/user-attachments/assets/c53af162-80f1-4367-8674-1d7377cd57d3" />
+<img width="1842" height="938" alt="image" src="https://github.com/user-attachments/assets/b548235a-9835-42f3-adcc-b79ed26417d4" />
+<img width="1853" height="933" alt="image" src="https://github.com/user-attachments/assets/30ec7ea1-a79f-4153-bf3f-3fbd8f23bfb6" />
+
+
+
+
 ## Description
 
 **Athena** is a universal CSV data assistant built for analysts, researchers, and anyone who works with tabular exports but does not want to write pandas by hand. Upload a spreadsheet, describe what you want to know in natural language, and Athena generates safe pandas code, executes it in a sandbox, visualizes the result when appropriate, and summarizes the finding in plain English.
