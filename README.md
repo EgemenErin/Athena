@@ -7,7 +7,7 @@
 
 > **Talk to your data** — upload any CSV, ask questions in plain English, and get tables, charts, and narrative insights. Everything runs locally on your machine via [Ollama](https://ollama.com/); your data never leaves your device.
 
-Repository: [github.com/EgemenErin/Iroh](https://github.com/EgemenErin/Iroh)
+Repository: [github.com/EgemenErin/Athena](https://github.com/EgemenErin/Athena)
 
 ---
 
@@ -48,7 +48,7 @@ The project exists to close the gap between “I have a CSV” and “I have an 
 **Project layout**
 
 ```
-Iroh/
+Athena/
 ├── app.py                 # Streamlit entry point
 ├── requirements.txt
 ├── athena/
@@ -105,8 +105,8 @@ You should see `qwen2.5-coder:7b` (or a variant containing `qwen2.5-coder`) in t
 
 ```bash
 # Clone the repository
-git clone https://github.com/EgemenErin/Iroh.git
-cd Iroh
+git clone https://github.com/EgemenErin/Athena.git
+cd Athena
 
 # Create and activate a virtual environment (recommended)
 python -m venv .venv
@@ -271,10 +271,10 @@ This project is licensed under the **MIT License** — see the [LICENSE](LICENSE
 **Egemen Erin**
 
 - GitHub: [@EgemenErin](https://github.com/EgemenErin)
-- Repository: [github.com/EgemenErin/Iroh](https://github.com/EgemenErin/Iroh)
-- Email: egemeneriin@protonmail.com 
+- Repository: [github.com/EgemenErin/Athena](https://github.com/EgemenErin/Athena)
+- Email: egemeneriin@protonmail.com
 
-Questions, bugs, and feature requests: please use [GitHub Issues](https://github.com/EgemenErin/Iroh/issues).
+Questions, bugs, and feature requests: please use [GitHub Issues](https://github.com/EgemenErin/Athena/issues).
 
 ---
 
