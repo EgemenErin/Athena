@@ -1,4 +1,5 @@
 <img width="1366" height="768" alt="athenalogotext" src="https://github.com/user-attachments/assets/875f1420-92c7-4146-8d9a-22881624fe73" />
+<img width="1366" height="768" alt="athena" src="https://github.com/user-attachments/assets/85d5d5c7-6605-4b33-b45a-5676366eff23" />
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
