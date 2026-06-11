@@ -6,17 +6,28 @@ import numpy as np
 import ollama
 import pandas as pd
 
+from athena.charts.constants import (
+    MAX_BAR_CATEGORIES,
+    MAX_CODE_CARDINALITY,
+    MAX_HISTOGRAM_UNIQUE_RATIO,
+    MAX_PIE_SLICES,
+    MIN_HISTOGRAM_UNIQUE,
+    SUPPORTED_AGGREGATIONS,
+)
 from athena.config import MODEL
-from athena.llm.personas import BUSINESS_ANALYST_RULES
+from athena.llm.personas import CHART_ANALYST_RULES
 from athena.llm.chart_transforms import (
     infer_transform,
     is_multivalue_column,
     multivalue_columns,
 )
 from athena.llm.schema import (
+    boolean_flag_columns,
     build_column_index,
     categorical_columns,
     comparable_numeric_columns,
+    is_boolean_like,
+    is_quantitative_dtype,
     looks_numeric_string,
     numeric_columns,
 )
@@ -24,11 +35,6 @@ from athena.llm.schema import (
 ChartType = Literal["bar", "histogram", "scatter", "line", "pie"]
 
 CHART_TYPES: frozenset[str] = frozenset({"bar", "histogram", "scatter", "line", "pie"})
-MAX_BAR_CATEGORIES = 25
-MAX_PIE_SLICES = 10
-MIN_HISTOGRAM_UNIQUE = 5
-MAX_HISTOGRAM_UNIQUE_RATIO = 0.5
-MAX_CODE_CARDINALITY = 80
 
 _ID_NAME = re.compile(
     r"(^id$|_id$|^id_|response.?id|uuid|guid|(^|_)index($|_)|(^|_)key($|_)|"
@@ -72,7 +78,7 @@ def _is_likely_identifier(df: pd.DataFrame, col: str) -> bool:
     if n == 0 or len(series) == 0:
         return False
 
-    if not pd.api.types.is_numeric_dtype(df[col]):
+    if not is_quantitative_dtype(df[col].dtype):
         cl = col.lower()
         return cl in ("id", "index", "key") or cl.endswith("_id") or cl.endswith(" id")
 
@@ -81,7 +87,9 @@ def _is_likely_identifier(df: pd.DataFrame, col: str) -> bool:
         return True
 
     if nunique == n and n >= 20:
-        sorted_vals = np.sort(series.to_numpy())
+        sorted_vals = np.sort(pd.to_numeric(series, errors="coerce").dropna().astype(float).to_numpy())
+        if len(sorted_vals) < 2:
+            return False
         diffs = np.diff(sorted_vals)
         if len(diffs) > 0 and np.median(diffs) > 0:
             if np.mean(diffs == 1) >= 0.85 or np.mean(np.abs(diffs - np.median(diffs)) < 1e-9) >= 0.85:
@@ -103,7 +111,7 @@ def _is_integer_like(series: pd.Series) -> bool:
 
 
 def _is_calendar_year_column(df: pd.DataFrame, col: str) -> bool:
-    if col not in df.columns or not pd.api.types.is_numeric_dtype(df[col]):
+    if col not in df.columns or not is_quantitative_dtype(df[col].dtype):
         return False
     if not re.search(r"\byear\b", col, re.IGNORECASE) and col.upper() != "YEAR":
         return False
@@ -116,7 +124,7 @@ def _is_calendar_year_column(df: pd.DataFrame, col: str) -> bool:
 
 def _is_coded_numeric_dimension(df: pd.DataFrame, col: str) -> bool:
     """Numeric columns that are labels (district #, FBI code), not measurements."""
-    if col not in df.columns or not pd.api.types.is_numeric_dtype(df[col]):
+    if col not in df.columns or not is_quantitative_dtype(df[col].dtype):
         return False
     if _is_likely_identifier(df, col):
         return True
@@ -135,7 +143,7 @@ def _is_coded_numeric_dimension(df: pd.DataFrame, col: str) -> bool:
     if not _is_integer_like(series):
         return False
 
-    vals = pd.to_numeric(series, errors="coerce").dropna()
+    vals = pd.to_numeric(series, errors="coerce").dropna().astype(float)
     span = float(vals.max() - vals.min())
     if span <= 0:
         return True
@@ -151,11 +159,13 @@ def _is_continuous_metric(df: pd.DataFrame, col: str) -> bool:
     """Numeric columns safe for mean, scatter, or distribution (not area codes / years)."""
     if col not in df.columns:
         return False
+    if is_boolean_like(df[col]):
+        return False
     if is_multivalue_column(df, col):
         return False
     if looks_numeric_string(df[col]):
         return not _is_likely_identifier(df, col)
-    if not pd.api.types.is_numeric_dtype(df[col]):
+    if not is_quantitative_dtype(df[col].dtype):
         return False
     if _is_likely_identifier(df, col) or _is_coded_numeric_dimension(df, col):
         return False
@@ -174,7 +184,7 @@ def _is_continuous_metric(df: pd.DataFrame, col: str) -> bool:
     if nunique < 20:
         return False
 
-    vals = pd.to_numeric(series, errors="coerce").dropna()
+    vals = pd.to_numeric(series, errors="coerce").dropna().astype(float)
     span = float(vals.max() - vals.min())
     if span <= 0:
         return False
@@ -243,9 +253,12 @@ def _histogram_suitable_columns(df: pd.DataFrame, max_cols: int = 4) -> list[tup
             transform = "bin"
         elif nunique > 25:
             transform = "bin"
-        if transform != "bin" and not _has_non_uniform_distribution(df, col):
-            continue
-        scored.append((float(_metric_name_score(col)) + 1.0, col, transform))
+        # Distribution shape is a scoring signal, not a hard filter:
+        # uniform metrics can still get a histogram, just ranked lower.
+        score = float(_metric_name_score(col)) + 1.0
+        if _has_non_uniform_distribution(df, col):
+            score += 1.5
+        scored.append((score, col, transform))
     scored.sort(key=lambda x: (-x[0], x[1]))
     return [(c, t) for _, c, t in scored[:max_cols]]
 
@@ -309,6 +322,51 @@ def _meaningful_categorical_columns(df: pd.DataFrame, max_cols: int = 8) -> list
     return _insightful_categorical_columns(df, max_cols=max_cols)
 
 
+_MONTH_NAMES = {
+    "january", "february", "march", "april", "may", "june", "july",
+    "august", "september", "october", "november", "december",
+    "jan", "feb", "mar", "apr", "jun", "jul", "aug", "sep", "sept",
+    "oct", "nov", "dec",
+}
+
+_WEEKDAY_NAMES = {
+    "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday",
+    "mon", "tue", "tues", "wed", "thu", "thur", "thurs", "fri", "sat", "sun",
+}
+
+
+def _is_named_period_column(df: pd.DataFrame, col: str) -> bool:
+    """Month or weekday name columns — naturally ordered line axes."""
+    if col not in df.columns or is_quantitative_dtype(df[col].dtype):
+        return False
+    values = df[col].dropna().astype(str).str.strip().str.lower().unique()
+    if len(values) < 2 or len(values) > 12:
+        return False
+    vals = set(values)
+    return vals <= _MONTH_NAMES or vals <= _WEEKDAY_NAMES
+
+
+def _is_ordered_line_axis(df: pd.DataFrame, col: str) -> bool:
+    """
+    Axes with a natural left-to-right order: calendar years, datetimes,
+    ordered categoricals, month/weekday names, and small numeric sequences.
+    """
+    if col not in df.columns:
+        return False
+    if _is_calendar_year_column(df, col) or _is_datetime_column(df, col):
+        return True
+    if isinstance(df[col].dtype, pd.CategoricalDtype) and df[col].dtype.ordered:
+        return True
+    if _is_named_period_column(df, col):
+        return True
+    if is_quantitative_dtype(df[col].dtype) and not _is_likely_identifier(df, col):
+        if is_boolean_like(df[col]):
+            return False
+        nunique = df[col].nunique(dropna=True)
+        return 3 <= nunique <= 100 and _is_integer_like(df[col].dropna())
+    return False
+
+
 def _is_datetime_column(df: pd.DataFrame, col: str) -> bool:
     if _is_likely_identifier(df, col) or _is_coded_numeric_dimension(df, col):
         return False
@@ -355,6 +413,8 @@ def _fallback_rationale(spec: dict[str, Any]) -> str:
     if chart_type == "bar":
         if _is_count_bar(spec):
             return f"Counts rows per {hx} category."
+        if spec.get("aggregation") == "pct_true" and y:
+            return f"Shows the share of {hy} = True within each {hx} group."
         if y:
             return f"Compares average {hy} across each {hx} group."
         return f"Bar chart grouped by {hx}."
@@ -385,6 +445,11 @@ def _normalize_spec(raw: dict[str, Any]) -> dict[str, Any] | None:
     x_str = str(x).strip() if x is not None and str(x).strip() else None
     y_str = str(y).strip() if y is not None and str(y).strip() else None
     agg_str = str(agg).strip().lower() if agg else None
+    _AGG_ALIASES = {"average": "mean", "avg": "mean", "total": "sum"}
+    if agg_str in _AGG_ALIASES:
+        agg_str = _AGG_ALIASES[agg_str]
+    if agg_str and agg_str not in SUPPORTED_AGGREGATIONS:
+        agg_str = "count" if y_str == "count" else None
     tx_str = str(tx).strip().lower() if tx else None
     ty_str = str(ty).strip().lower() if ty else None
     rationale = str(raw.get("rationale") or raw.get("description") or "").strip()
@@ -440,13 +505,13 @@ def validate_chart_spec(df: pd.DataFrame, spec: dict[str, Any]) -> bool:
         return _validate_renderable(df, normalized)
 
     if chart_type == "line":
-        if not _col_ok(x):
+        if not _col_ok(x) or not _is_ordered_line_axis(df, x):
             return False
         if _is_count_bar(normalized):
-            return x in breakdowns and _is_calendar_year_column(df, x)
+            return True
         if not _col_ok(y) or not _is_continuous_metric(df, y):
             return False
-        return _is_calendar_year_column(df, x) or _is_datetime_column(df, x)
+        return True
 
     if chart_type == "pie":
         if not _col_ok(x) or _is_likely_identifier(df, x):
@@ -466,7 +531,14 @@ def validate_chart_spec(df: pd.DataFrame, spec: dict[str, Any]) -> bool:
             return False
         if _is_count_bar(normalized):
             return _validate_renderable(df, normalized)
-        if not _col_ok(y) or not _is_continuous_metric(df, y):
+        if normalized.get("aggregation") == "pct_true":
+            if not _col_ok(y) or not is_boolean_like(df[y]):
+                return False
+            return _validate_renderable(df, normalized)
+        if not _col_ok(y):
+            return False
+        # 0/1 flags must never be averaged as continuous metrics — require pct_true.
+        if is_boolean_like(df[y]) or not _is_continuous_metric(df, y):
             return False
         return _validate_renderable(df, normalized)
 
@@ -527,7 +599,11 @@ def _chart_variant(spec: dict[str, Any]) -> str:
     if chart_type == "line":
         return "line_count" if _is_count_bar(spec) else "line_mean"
     if chart_type == "bar":
-        return "bar_count" if _is_count_bar(spec) else "bar_mean"
+        if _is_count_bar(spec):
+            return "bar_count"
+        if spec.get("aggregation") == "pct_true":
+            return "bar_pct_true"
+        return "bar_mean"
     return chart_type
 
 
@@ -586,6 +662,7 @@ def _select_diverse_specs(
         "line_count",
         "bar_count",
         "bar_mean",
+        "bar_pct_true",
         "pie",
         "histogram",
         "scatter",
@@ -706,6 +783,34 @@ def _collect_fallback_candidates(df: pd.DataFrame) -> list[dict[str, Any]]:
                         ),
                     )
                 )
+
+    for flag in boolean_flag_columns(df, max_cols=4):
+        candidates.append(
+            _make_spec(
+                "bar",
+                x=flag,
+                y="count",
+                aggregation="count",
+                title=f"Count of {_humanize(flag)} values",
+                rationale=f"How many rows are True vs False in `{flag}`.",
+            )
+        )
+        for dim in breakdowns[:5]:
+            if dim == flag or not (2 <= df[dim].nunique(dropna=True) <= MAX_BAR_CATEGORIES):
+                continue
+            candidates.append(
+                _make_spec(
+                    "bar",
+                    x=dim,
+                    y=flag,
+                    aggregation="pct_true",
+                    title=f"% {_humanize(flag)} by {_humanize(dim)}",
+                    rationale=(
+                        f"Share of rows where `{flag}` is True within each "
+                        f"`{dim}` group — flags are rates, not averages."
+                    ),
+                )
+            )
 
     for dim in breakdowns:
         nunique = df[dim].nunique(dropna=True)
@@ -850,6 +955,18 @@ def _synthesize_candidates_for_columns(
                 )
             )
 
+    if y and y in df.columns and y != "count" and is_boolean_like(df[y]) and user_breakdown:
+        candidates.append(
+            _make_spec(
+                "bar",
+                x=x,
+                y=y,
+                aggregation="pct_true",
+                title=f"% {_humanize(y)} by {_humanize(x)}",
+                rationale=f"Share of rows where `{y}` is True within each `{x}` group.",
+            )
+        )
+
     if y and y in df.columns and y != "count" and _is_continuous_metric(df, y):
         if user_breakdown:
             ty = "coerce" if looks_numeric_string(df[y]) else None
@@ -954,15 +1071,38 @@ def _fallback_chart_suggestions(df: pd.DataFrame, n: int = 6) -> list[dict[str, 
     return _select_diverse_specs(_collect_fallback_candidates(df), df, n)
 
 
+def _strip_code_fences(text: str) -> str:
+    match = re.search(r"```(?:json)?\s*(.*?)```", text, re.DOTALL)
+    if match:
+        return match.group(1).strip()
+    return text
+
+
+def _extract_json_array(text: str) -> str | None:
+    start = text.find("[")
+    end = text.rfind("]")
+    if start != -1 and end > start:
+        return text[start : end + 1]
+    return None
+
+
 def _parse_llm_specs(raw: str, n: int) -> list[dict[str, Any]]:
-    text = raw.strip()
+    text = _strip_code_fences(raw.strip())
     if not text:
         return []
 
     specs: list[dict[str, Any]] = []
 
-    try:
-        data = json.loads(text)
+    candidates = [text]
+    array_part = _extract_json_array(text)
+    if array_part and array_part != text:
+        candidates.append(array_part)
+
+    for candidate in candidates:
+        try:
+            data = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
         if isinstance(data, list):
             for item in data:
                 if isinstance(item, dict):
@@ -970,8 +1110,6 @@ def _parse_llm_specs(raw: str, n: int) -> list[dict[str, Any]]:
                     if normalized:
                         specs.append(normalized)
             return specs[: n * 2]
-    except json.JSONDecodeError:
-        pass
 
     for line in text.splitlines():
         line = line.strip()
@@ -1019,7 +1157,7 @@ def generate_chart_suggestions(
     schema_excerpt = schema if len(schema) <= 4000 else schema[:4000] + "\n... (truncated)"
 
     prompt = (
-        f"{BUSINESS_ANALYST_RULES}\n\n"
+        f"{CHART_ANALYST_RULES}\n\n"
         f"Dataset: {df.shape[0]:,} rows, {df.shape[1]} columns.\n"
         f"Measured metrics (for averages / scatter): "
         f"{', '.join(f'`{c}`' for c in metrics) or 'none'}\n"
@@ -1030,27 +1168,43 @@ def generate_chart_suggestions(
         f"Suggest exactly {n} charts as a JSON array. Each object:\n"
         '- "chart_type": bar, histogram, scatter, line, or pie\n'
         '- "x", "y": exact column names (y may be null for pie)\n'
-        '- "aggregation": optional — use "count" for bar/line showing row volume by group\n'
+        '- "aggregation": optional — "count" for row volume by group; "mean", "median", '
+        '"sum", "min", "max" for value bars; "pct_true" for boolean/0-1 flag rates\n'
         '- "transform_x" / "transform_y": optional — "coerce" (parse numeric text), '
         '"bin" (bucket into ranges), "explode" (split list-like cells on ; or |)\n'
-        '- "title": short chart headline\n'
-        '- "rationale": 1–2 sentences — what this chart shows and what decision it supports '
-        '(required; also accepted as "description")\n\n'
+        '- "title": a real stakeholder question this chart answers (must end with "?")\n'
+        '- "rationale": 1–2 sentences — what problem this solves, what to look for, '
+        'and what action it might trigger (required; also accepted as "description")\n\n'
         "Transforms: use explode for multi-value text columns; coerce for numeric strings; "
         "bin for high-cardinality metrics.\n\n"
-        "STRICT rules:\n"
-        "- NEVER chart ID/ResponseId/uuid columns.\n"
-        "- NEVER scatter geographic/admin codes (District, Area Number, FBI Code, Zip) "
-        "against each other or against Year — those are labels, not measurements.\n"
-        "- District / Community Area / FBI Code / Year are GROUP-BY axes only "
-        '(bar with aggregation "count", or average of a real metric).\n'
-        "- Scatter ONLY between two columns from the measured metrics list.\n"
-        "- Use 6 DIFFERENT primary groupings (x): never repeat the same x column twice.\n"
-        "- Vary chart_type across the six (mix bar, line, pie, histogram, scatter when valid).\n"
-        "- Prefer: (1) count by one district/year/type, (2) average metric by a different group, "
-        "(3) trend over year, (4) pie for another category, (5) histogram of a metric, "
-        "(6) scatter of two metrics.\n"
-        "JSON array only:\n"
+        "Question-first rules:\n"
+        "1. Think in this order: stakeholder question -> columns needed -> chart type. "
+        "Never reverse it.\n"
+        "2. Cover a mix of real problems:\n"
+        "   - Where is the problem concentrated? (top groups by count or total)\n"
+        "   - Who is underperforming or overperforming? (compare groups on a metric)\n"
+        "   - Is the situation improving or worsening? (trend over time/year)\n"
+        "   - What does typical look like? (histogram of a metric)\n"
+        "   - Where are the extremes? (scatter or binned comparison of two metrics)\n"
+        "   - What share does each segment represent? (pie or % bar for a meaningful category)\n"
+        "3. Titles must sound like something a human would ask in a meeting, "
+        "not a chart catalog entry.\n"
+        '   Good: "Which departments have the highest average salary?"\n'
+        '   Bad: "Average salary by department bar chart"\n'
+        "4. Rationales must mention a decision, not just describe axes.\n"
+        '   Good: "Helps HR prioritize retention budgets by spotting departments '
+        'paying below peer groups."\n'
+        '   Bad: "Shows salary grouped by department."\n'
+        f"5. Use {n} DIFFERENT primary groupings (x): never repeat the same x column twice.\n"
+        "6. Vary chart_type across the suggestions (mix bar, line, pie, histogram, "
+        "scatter when valid).\n"
+        '7. Boolean or 0/1 flag columns are rates: use aggregation "pct_true" with a '
+        "group-by x — never mean/scatter them.\n"
+        "8. Geographic/admin codes (District, Area Number, FBI Code, Zip) are labels, "
+        "not measurements — group by them, never scatter them against each other or Year.\n"
+        "9. Scatter ONLY between two columns from the measured metrics list.\n"
+        "10. NEVER chart ID/ResponseId/uuid columns.\n"
+        "JSON array only. No markdown, no explanation outside the array:\n"
     )
 
     pool = _collect_fallback_candidates(df)
@@ -1059,7 +1213,7 @@ def generate_chart_suggestions(
         response = ollama.chat(
             model=MODEL,
             messages=[{"role": "user", "content": prompt}],
-            options={"temperature": 0.35, "num_predict": 900},
+            options={"temperature": 0.45, "num_predict": 900},
         )
         llm_specs = _parse_llm_specs(response["message"]["content"].strip(), n)
     except Exception:

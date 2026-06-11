@@ -6,6 +6,7 @@ from athena.llm.cleaning import (
     SUPPORTED_TYPES,
     analyze_for_cleaning,
     apply_cleaning_actions,
+    outlier_mask,
     preview_stats,
     validate_action,
 )
@@ -97,6 +98,27 @@ def _resolution_choices(action: dict, df: pd.DataFrame) -> list[tuple[str, dict]
         choices.append(_pack("Drop column", {"type": "drop_column"}))
         return choices
 
+    if action_type in ("drop_outlier_rows", "cap_outliers") and col in numeric_columns(df):
+        lo = action.get("lower_percentile", 1)
+        hi = action.get("upper_percentile", 99)
+        drop_iqr = _pack(
+            "Remove outlier rows (IQR)",
+            {"type": "drop_outlier_rows", "method": "iqr", "factor": 1.5},
+        )
+        drop_z = _pack(
+            "Remove outlier rows (z-score)",
+            {"type": "drop_outlier_rows", "method": "zscore", "threshold": 3.0},
+        )
+        cap = _pack(
+            f"Cap extreme values (P{lo}–P{hi})",
+            {"type": "cap_outliers", "lower_percentile": lo, "upper_percentile": hi},
+        )
+        if action_type == "cap_outliers":
+            return [cap, drop_iqr, drop_z]
+        if action.get("method") == "zscore":
+            return [drop_z, drop_iqr, cap]
+        return [drop_iqr, drop_z, cap]
+
     return [(_action_label(action), action)]
 
 
@@ -164,6 +186,55 @@ def _restore_original() -> None:
         st.rerun()
 
 
+def _action_impact(action: dict, df: pd.DataFrame) -> str | None:
+    """Concrete effect of one action, shown before apply ('−47 rows', '−1 column')."""
+    action_type = action.get("type")
+    col = action.get("column")
+
+    if action_type == "drop_column":
+        return "−1 column"
+    if action_type == "drop_duplicate_rows":
+        n = int(df.duplicated().sum())
+        return f"−{n:,} rows" if n else None
+    if action_type == "drop_rows_all_null":
+        cols = action.get("columns")
+        n = int(df.isna().all(axis=1).sum()) if not cols else int(
+            df[cols].isna().all(axis=1).sum()
+        )
+        return f"−{n:,} rows" if n else None
+    if not col or col not in df.columns:
+        return None
+    if action_type == "fill_null":
+        n = int(df[col].isna().sum())
+        return f"fills {n:,} cells" if n else None
+    if action_type == "drop_outlier_rows":
+        mask = outlier_mask(
+            df[col],
+            method=action.get("method", "iqr"),
+            factor=float(action.get("factor", 1.5)),
+            threshold=float(action.get("threshold", 3.0)),
+        )
+        n = int(mask.fillna(False).sum())
+        return f"−{n:,} rows" if n else "no rows affected"
+    if action_type == "cap_outliers":
+        lo = float(action.get("lower_percentile", 1)) / 100
+        hi = float(action.get("upper_percentile", 99)) / 100
+        lower = df[col].quantile(lo)
+        upper = df[col].quantile(hi)
+        n = int(((df[col] < lower) | (df[col] > upper)).sum())
+        return f"caps {n:,} values" if n else "no values affected"
+    return None
+
+
+def _source_badge(action: dict) -> str:
+    source = action.get("source")
+    if source == "ai":
+        return "AI"
+    if source == "heuristic":
+        return "heuristic"
+    return ""
+
+
 def _render_action_row(action: dict, df: pd.DataFrame) -> None:
     if action.get("type") == "skip":
         st.caption(f"✓ {_action_label(action)}")
@@ -185,11 +256,17 @@ def _render_action_row(action: dict, df: pd.DataFrame) -> None:
         st.checkbox(label, value=False, disabled=True, key=f"disabled_{key}")
         return
 
+    badge = _source_badge(action)
+    resolved = _resolved_action(action, df) if len(choices) > 1 else action
+    impact = _action_impact(resolved, df)
+    meta_bits = [b for b in (badge, impact) if b]
+    meta = f" · {' · '.join(meta_bits)}" if meta_bits else ""
+
     if len(choices) > 1:
         title = f"Column `{col}`" if col else _action_label(action).split(" — ")[0]
         st.checkbox(title, key=key)
-        if reason:
-            st.caption(reason)
+        if reason or meta:
+            st.caption(f"{reason}{meta}")
         labels = [c[0] for c in choices]
         resolve_key = f"clean_resolve_{aid}"
         default_idx = 0
@@ -204,8 +281,18 @@ def _render_action_row(action: dict, df: pd.DataFrame) -> None:
             key=resolve_key,
             label_visibility="visible",
         )
+        if resolved.get("type") == "drop_outlier_rows" and col in df.columns:
+            mask = outlier_mask(
+                df[col],
+                method=resolved.get("method", "iqr"),
+                factor=float(resolved.get("factor", 1.5)),
+                threshold=float(resolved.get("threshold", 3.0)),
+            ).fillna(False)
+            if mask.any():
+                with st.expander(f"Rows that would be removed ({int(mask.sum()):,})"):
+                    st.dataframe(df.loc[mask].head(5), use_container_width=True)
     else:
-        st.checkbox(_action_label(action), key=key)
+        st.checkbox(f"{_action_label(action)}{meta}", key=key)
 
 
 def _render_cleaning_workflow(df: pd.DataFrame) -> None:
@@ -255,6 +342,16 @@ def _render_cleaning_workflow(df: pd.DataFrame) -> None:
         return
 
     st.markdown(proposal.get("summary", ""))
+
+    failed_batches = proposal.get("ai_failed_batches", 0)
+    if failed_batches:
+        total_batches = proposal.get("ai_total_batches", 0)
+        st.warning(
+            f"{failed_batches} of {total_batches} AI batches failed (even after retry). "
+            "Affected columns use rule-based heuristics instead — look for the "
+            "'heuristic' badge below."
+        )
+
     actions = proposal.get("actions", [])
 
     if not actions:
@@ -338,7 +435,8 @@ def render_cleaning_page() -> None:
         st.markdown(
             """
             <div class="landing-hero">
-                <h1>Prepare your CSV</h1>
+                <p class="hero-kicker">Clean data</p>
+                <h1>Prepare <em>your CSV</em></h1>
                 <p>Upload a file in the sidebar, then analyze quality issues, apply fixes,
                 and download a cleaned export.</p>
             </div>

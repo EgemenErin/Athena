@@ -1,8 +1,42 @@
 import pandas as pd
 
 
+def is_quantitative_dtype(dtype) -> bool:
+    """Numeric dtypes safe for mean, diff, outliers — excludes boolean."""
+    return (
+        pd.api.types.is_numeric_dtype(dtype)
+        and not pd.api.types.is_bool_dtype(dtype)
+    )
+
+
+def is_boolean_like(series: pd.Series) -> bool:
+    """True for bool / nullable boolean dtypes and 0/1 integer flag columns."""
+    if pd.api.types.is_bool_dtype(series.dtype):
+        return True
+    if not pd.api.types.is_numeric_dtype(series.dtype):
+        return False
+    values = series.dropna().unique()
+    if len(values) == 0 or len(values) > 2:
+        return False
+    try:
+        return set(float(v) for v in values) <= {0.0, 1.0}
+    except (TypeError, ValueError):
+        return False
+
+
+def boolean_flag_columns(df: pd.DataFrame, max_cols: int = 8) -> list[str]:
+    """Boolean and 0/1 flag columns suitable for % True charts."""
+    out: list[str] = []
+    for col in df.columns:
+        if is_boolean_like(df[col]) and df[col].dropna().nunique() == 2:
+            out.append(col)
+        if len(out) >= max_cols:
+            break
+    return out
+
+
 def numeric_columns(df: pd.DataFrame) -> list[str]:
-    return [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c].dtype)]
+    return [c for c in df.columns if is_quantitative_dtype(df[c].dtype)]
 
 
 def categorical_columns(df: pd.DataFrame) -> list[str]:
@@ -35,7 +69,7 @@ def comparable_numeric_columns(df: pd.DataFrame) -> list[str]:
     """Columns safe for >, <, mean, etc. (native numeric or numeric-like text)."""
     out: list[str] = []
     for col in df.columns:
-        if pd.api.types.is_numeric_dtype(df[col].dtype):
+        if is_quantitative_dtype(df[col].dtype):
             out.append(col)
         elif looks_numeric_string(df[col]):
             out.append(col)
@@ -49,7 +83,14 @@ def build_schema_string(df: pd.DataFrame, max_values: int = 10) -> str:
         dtype = df[col].dtype
         null_count = int(df[col].isna().sum())
 
-        if pd.api.types.is_numeric_dtype(dtype):
+        if pd.api.types.is_bool_dtype(dtype):
+            samples = df[col].dropna().unique()[:max_values]
+            sample_str = ", ".join(str(v) for v in samples)
+            lines.append(
+                f"Column: '{col}'  dtype: {dtype} (boolean)\n"
+                f"  sample values: {sample_str}  |  nulls: {null_count}"
+            )
+        elif is_quantitative_dtype(dtype):
             col_min = df[col].min()
             col_max = df[col].max()
             lines.append(

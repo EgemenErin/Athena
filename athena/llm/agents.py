@@ -91,6 +91,167 @@ def format_plan_for_analyst(plan: dict) -> str:
     )
 
 
+_COUNT_QUESTION = re.compile(r"\b(how many|count|number of)\b", re.IGNORECASE)
+_CORRELATION_QUESTION = re.compile(r"\b(correlat|relationship between)\b", re.IGNORECASE)
+
+# Result column names that never need to match plan columns (aggregation outputs).
+_GENERIC_RESULT_COLUMNS = frozenset({
+    "count", "counts", "value", "values", "mean", "median", "sum", "total",
+    "n", "pct", "percent", "percentage", "share", "result", "index", "size",
+    "min", "max", "std", "avg", "average", "frequency", "freq",
+})
+
+
+def _is_correlation_like(result) -> bool:
+    if not isinstance(result, pd.DataFrame):
+        return False
+    rows, cols = result.shape
+    if rows != cols or rows < 2 or rows > 12:
+        return False
+    return len(result.select_dtypes(include="number").columns) == cols
+
+
+def _result_is_empty(result) -> bool:
+    """Empty frames/series, all-NaN results, and NaN scalars all count as 'no answer'."""
+    if result is None:
+        return True
+    if isinstance(result, pd.DataFrame):
+        if len(result) == 0:
+            return True
+        try:
+            return bool(result.isna().all().all())
+        except (TypeError, ValueError):
+            return False
+    if isinstance(result, pd.Series):
+        if len(result) == 0:
+            return True
+        try:
+            return bool(result.isna().all())
+        except (TypeError, ValueError):
+            return False
+    try:
+        return bool(pd.isna(result))
+    except (TypeError, ValueError):
+        return False
+
+
+def _normalize_name(name) -> str:
+    return re.sub(r"[^a-z0-9]", "", str(name).lower())
+
+
+def _columns_relate(result_col: str, plan_cols: list[str]) -> bool:
+    rc = _normalize_name(result_col)
+    if not rc or rc in {_normalize_name(g) for g in _GENERIC_RESULT_COLUMNS}:
+        return True
+    for plan_col in plan_cols:
+        pc = _normalize_name(plan_col)
+        if pc and (pc in rc or rc in pc):
+            return True
+    return False
+
+
+def check_expected_shape(plan: dict | None, result) -> str | None:
+    """Return feedback when the result shape contradicts the plan, else None."""
+    shape = (plan or {}).get("expected_shape")
+    if not shape:
+        return None
+
+    if shape == "scalar":
+        if isinstance(result, pd.DataFrame):
+            if result.shape[0] > 1 or result.shape[1] > 2:
+                return (
+                    "The plan expected a single number (scalar), but the result is a "
+                    f"{result.shape[0]}×{result.shape[1]} table. Return one value "
+                    "(e.g. a count or aggregate) assigned to `result`."
+                )
+            if _is_correlation_like(result):
+                return (
+                    "The plan expected a single number, but the result is a correlation "
+                    "matrix. Compute the requested count/aggregate instead."
+                )
+        elif isinstance(result, pd.Series) and len(result) > 1:
+            return (
+                "The plan expected a single number (scalar), but the result is a series "
+                f"with {len(result)} values. Return one value assigned to `result`."
+            )
+        return None
+
+    if shape == "correlation":
+        if not _is_correlation_like(result):
+            return (
+                "The plan expected a correlation matrix, but the result is not a square "
+                "numeric matrix. Use df[cols].corr() on the relevant numeric columns."
+            )
+        return None
+
+    if shape in ("grouped_table", "list"):
+        if not isinstance(result, (pd.DataFrame, pd.Series)):
+            return (
+                f"The plan expected a {shape.replace('_', ' ')}, but the result is a "
+                f"single {type(result).__name__}. Return a table/series with one row "
+                "per group or value."
+            )
+        if _is_correlation_like(result):
+            return (
+                f"The plan expected a {shape.replace('_', ' ')}, but the result looks "
+                "like a correlation matrix. Use groupby/value_counts instead of .corr()."
+            )
+    return None
+
+
+def deterministic_review(
+    question: str,
+    plan: dict | None,
+    result,
+) -> dict:
+    """
+    Rule-based result checks that run without the LLM.
+    Returns {"ok": bool, "feedback": str}.
+    """
+    if _result_is_empty(result):
+        return {
+            "ok": False,
+            "feedback": (
+                "The result is empty or NaN — the filter probably matched zero rows. "
+                "The value in the question may not match the data exactly (e.g. "
+                "'United States' may be stored as 'United States of America'). "
+                "Use .str.contains(<distinctive substring>, case=False, na=False) "
+                "instead of ==, and check the schema sample values for exact spellings."
+            ),
+        }
+
+    if (
+        _COUNT_QUESTION.search(question)
+        and not _CORRELATION_QUESTION.search(question)
+        and _is_correlation_like(result)
+    ):
+        return {
+            "ok": False,
+            "feedback": (
+                "The user asked for a count, but the result is a correlation matrix. "
+                "Compute the count (len, sum, nunique, or value_counts) instead of .corr()."
+            ),
+        }
+
+    shape_feedback = check_expected_shape(plan, result)
+    if shape_feedback:
+        return {"ok": False, "feedback": shape_feedback}
+
+    plan_cols = [c for c in ((plan or {}).get("columns") or []) if c]
+    if plan_cols and isinstance(result, pd.DataFrame) and len(result.columns) > 0:
+        names = list(result.columns) + [n for n in (result.index.names or []) if n]
+        if not any(_columns_relate(name, plan_cols) for name in names):
+            return {
+                "ok": False,
+                "feedback": (
+                    f"The result columns {list(result.columns)[:4]} do not relate to the "
+                    f"planned columns {plan_cols[:4]}. Use the planned columns from the schema."
+                ),
+            }
+
+    return {"ok": True, "feedback": ""}
+
+
 def review_result(
     question: str,
     plan: dict | None,
@@ -98,11 +259,17 @@ def review_result(
     code: str | None,
 ) -> dict:
     """
-    Reviewer agent: check if result matches the question/plan.
+    Reviewer: deterministic rule checks first, then LLM judgment.
+    Fails closed — if the LLM reply cannot be parsed, the rule-based
+    verdict stands instead of silently passing.
     Returns {"ok": bool, "feedback": str}.
     """
     if result is None:
         return {"ok": False, "feedback": "No result was produced."}
+
+    rule_verdict = deterministic_review(question, plan, result)
+    if not rule_verdict["ok"]:
+        return rule_verdict
 
     if isinstance(result, pd.DataFrame):
         preview = result.head(8).to_string(index=False)
@@ -158,7 +325,8 @@ Pass if: result reasonably answers the question.
     except Exception:
         pass
 
-    return {"ok": True, "feedback": ""}
+    # LLM reply unusable — fall back to the rule-based verdict (already ok here).
+    return rule_verdict
 
 
 def build_analyst_user_message(question: str, plan: dict | None) -> str:

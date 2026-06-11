@@ -5,8 +5,9 @@ from typing import Any
 import pandas as pd
 import streamlit as st
 
+from athena.charts.constants import AGGREGATION_LABELS, BUILDER_BAR_AGGREGATIONS
 from athena.llm.chart_suggestions import _spec_key, chart_description, suggest_charts_for_columns
-from athena.ui.charts import build_chart_from_spec
+from athena.ui.charts import build_chart_from_spec, chart_truncation_note
 from athena.ui.helpers import load_chart_suggestions, render_stat_cards
 from athena.ui.pdf_export import build_dashboard_pdf
 
@@ -55,6 +56,9 @@ def _render_chart_card(
         st.warning("Could not render this chart.")
     else:
         st.plotly_chart(fig, use_container_width=True, key=f"{key_prefix}_plot")
+        note = chart_truncation_note(fig)
+        if note:
+            st.caption(note)
 
     btn_cols = st.columns(2) if (show_save or show_remove) else []
     col_idx = 0
@@ -124,15 +128,37 @@ def _chart_builder_dialog(df: pd.DataFrame) -> None:
         unsafe_allow_html=True,
     )
 
+    preview_spec = dict(chosen)
+
+    # Value bars support multiple aggregations (count/pct_true stay fixed).
+    is_value_bar = (
+        chosen.get("chart_type") == "bar"
+        and chosen.get("y")
+        and chosen.get("y") != "count"
+        and chosen.get("aggregation") not in ("count", "pct_true")
+    )
+    if is_value_bar:
+        agg_labels = [AGGREGATION_LABELS[a] for a in BUILDER_BAR_AGGREGATIONS]
+        agg_pick = st.selectbox("Aggregation", agg_labels, key="chart_builder_agg")
+        agg = BUILDER_BAR_AGGREGATIONS[agg_labels.index(agg_pick)]
+        preview_spec["aggregation"] = agg
+        default_title = chosen.get("title", "")
+        if default_title.startswith("Average ") and agg != "mean":
+            default_title = (
+                f"{AGGREGATION_LABELS[agg]} {default_title[len('Average '):]}"
+            )
+    else:
+        default_title = chosen.get("title", "")
+
     custom_title = st.text_input(
         "Chart title (optional)",
-        value=chosen.get("title", ""),
+        value=default_title,
         key="chart_builder_title",
     )
-
-    preview_spec = dict(chosen)
     if custom_title.strip():
         preview_spec["title"] = custom_title.strip()
+    elif default_title:
+        preview_spec["title"] = default_title
 
     if st.button("OK", type="primary", key="chart_builder_ok"):
         st.session_state.chart_builder_preview = preview_spec
@@ -145,6 +171,9 @@ def _chart_builder_dialog(df: pd.DataFrame) -> None:
             st.warning("Could not render this chart.")
         else:
             st.plotly_chart(fig, use_container_width=True, key="chart_builder_preview_plot")
+            note = chart_truncation_note(fig)
+            if note:
+                st.caption(note)
 
         if st.button("Save chart", type="primary", key="chart_builder_save"):
             _append_saved_chart(preview)
@@ -167,7 +196,8 @@ def render_dashboard_page() -> None:
         st.markdown(
             """
             <div class="landing-hero">
-                <h1>Visualize your CSV</h1>
+                <p class="hero-kicker">Dashboard</p>
+                <h1>Visualize <em>your CSV</em></h1>
                 <p>Upload a file in the sidebar to see AI-suggested charts
                 tailored to your columns.</p>
             </div>

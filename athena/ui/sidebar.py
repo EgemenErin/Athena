@@ -1,23 +1,25 @@
 import streamlit as st
 
+from athena.config import MODEL
+from athena.ui.branding import render_brand_header
 from athena.ui.helpers import check_ollama, load_csv_upload, load_suggestions, render_stat_cards
 
 
 def render_sidebar() -> None:
     with st.sidebar:
-        st.markdown('<p class="brand-title">Athena</p>', unsafe_allow_html=True)
-        st.markdown(
-            '<p class="brand-sub">Upload once — clean, dashboard, and chat.</p>',
-            unsafe_allow_html=True,
-        )
+        render_brand_header()
 
         if check_ollama():
+            label = MODEL.split(":")[0]
             st.markdown(
-                '<span class="status-pill">Local · qwen2.5-coder</span>',
+                f'<span class="status-pill">Ollama · {label}</span>',
                 unsafe_allow_html=True,
             )
         else:
-            st.warning("Ollama not reachable or model missing.")
+            st.warning(
+                "Ollama not reachable or model missing. "
+                "On Streamlit Cloud, set `OLLAMA_HOST` and `OLLAMA_MODEL` in app secrets."
+            )
 
         st.markdown("---")
 

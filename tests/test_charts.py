@@ -33,6 +33,8 @@ def test_series_chart():
 
 
 def test_build_chart_from_spec_uses_theme():
+    from athena.ui.charts import PLOTLY_THEME
+
     df = pd.DataFrame({"Age": [25, 30, 35, 40, 45]})
     spec = {
         "chart_type": "histogram",
@@ -42,4 +44,7 @@ def test_build_chart_from_spec_uses_theme():
     }
     fig = build_chart_from_spec(df, spec)
     assert fig is not None
-    assert fig.layout.paper_bgcolor == "#14161c"
+    assert fig.layout.paper_bgcolor == PLOTLY_THEME["paper_bgcolor"]
+    assert fig.layout.font.color == PLOTLY_THEME["font_color"]
+    # Kaleido-safe fallback font for PDF export
+    assert "Arial" in fig.layout.font.family

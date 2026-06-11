@@ -3,7 +3,11 @@ import re
 
 import pandas as pd
 
-from athena.llm.cleaning_columns import build_per_column_proposal
+from athena.llm.cleaning_columns import (
+    FILL_STRATEGIES,
+    OUTLIER_METHODS,
+    build_per_column_proposal,
+)
 from athena.llm.schema import build_schema_string, numeric_columns
 
 SUPPORTED_TYPES = frozenset({
@@ -16,9 +20,6 @@ SUPPORTED_TYPES = frozenset({
     "cap_outliers",
     "skip",
 })
-
-FILL_STRATEGIES = frozenset({"median", "mean", "mode", "constant"})
-OUTLIER_METHODS = frozenset({"iqr", "zscore"})
 
 
 def _iqr_outlier_mask(series: pd.Series, factor: float = 1.5) -> pd.Series:
@@ -177,6 +178,8 @@ def validate_action(df: pd.DataFrame, action: dict) -> str | None:
         strategy = action.get("strategy", "median")
         if strategy not in FILL_STRATEGIES:
             return f"Invalid fill strategy: {strategy!r}"
+        if strategy in ("mean", "median") and col not in numeric_columns(df):
+            return f"Cannot fill {col!r} with {strategy} — column is not numeric"
         if strategy == "constant" and "value" not in action:
             return "constant fill requires a 'value'"
         return None

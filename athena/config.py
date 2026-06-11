@@ -1,4 +1,8 @@
-MODEL = "qwen2.5-coder:7b"
+import os
+
+# Ollama model — override via Streamlit secrets or OLLAMA_MODEL env var on Community Cloud.
+MODEL = os.environ.get("OLLAMA_MODEL", "qwen2.5-coder:14b")
+
 MAX_RETRIES = 1
 MAX_REVIEW_RETRIES = 1
 ENABLE_AGENT_PIPELINE = True

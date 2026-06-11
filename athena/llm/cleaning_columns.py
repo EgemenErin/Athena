@@ -14,7 +14,7 @@ from athena.config import (
     CLEANING_NUM_PREDICT_PER_BATCH,
     MODEL,
 )
-from athena.llm.schema import numeric_columns
+from athena.llm.schema import coerce_numeric_like_columns, numeric_columns
 
 COLUMN_ACTION_TYPES = frozenset({
     "drop_column",
@@ -23,6 +23,9 @@ COLUMN_ACTION_TYPES = frozenset({
     "cap_outliers",
     "skip",
 })
+
+FILL_STRATEGIES = frozenset({"median", "mean", "mode", "constant"})
+OUTLIER_METHODS = frozenset({"iqr", "zscore"})
 
 CLEANING_DECISION_GUIDE = """
 You are a senior data engineer. Analyze EACH column independently and recommend exactly ONE action.
@@ -72,9 +75,45 @@ _ID_LIKE = re.compile(
     re.I,
 )
 
+_JUNK_INDEX_NAME = re.compile(r"^unnamed([:_\s.]|$)", re.I)
+
 
 def _is_id_like_column(name: str) -> bool:
     return bool(_ID_LIKE.search(name.replace(" ", "_")))
+
+
+def is_junk_index_column(df: pd.DataFrame, col: str) -> bool:
+    """Pandas export artifacts like 'Unnamed: 0' holding a row-number sequence."""
+    if not _JUNK_INDEX_NAME.match(str(col).strip()):
+        return False
+    series = df[col].dropna()
+    if len(series) == 0:
+        return True
+    if not pd.api.types.is_numeric_dtype(series.dtype):
+        return False
+    # Mostly-unique tolerates duplicated rows in otherwise sequential exports.
+    return series.nunique() >= len(series) * 0.95
+
+
+def duplicate_columns(df: pd.DataFrame) -> dict[str, str]:
+    """Map each duplicate column to the earlier column with identical values."""
+    out: dict[str, str] = {}
+    by_hash: dict[int, list[str]] = {}
+    for col in df.columns:
+        try:
+            h = int(pd.util.hash_pandas_object(df[col], index=False).sum())
+        except TypeError:
+            continue
+        duplicate_of = None
+        for prior in by_hash.get(h, []):
+            if df[col].equals(df[prior]):
+                duplicate_of = prior
+                break
+        if duplicate_of:
+            out[col] = duplicate_of
+        else:
+            by_hash.setdefault(h, []).append(col)
+    return out
 
 
 def _numeric_skew(series: pd.Series) -> float:
@@ -274,6 +313,34 @@ def heuristic_column_action(df: pd.DataFrame, col: str, profile: dict[str, Any] 
     }
 
 
+def _valid_action_fields(act: dict) -> bool:
+    """Validate strategy/method/percentiles at parse time — invalid actions are
+    dropped so the heuristic fallback covers those columns instead."""
+    action_type = act.get("type")
+
+    if action_type == "fill_null":
+        strategy = act.get("strategy", "median")
+        if strategy not in FILL_STRATEGIES:
+            return False
+        if strategy == "constant" and "value" not in act:
+            return False
+        return True
+
+    if action_type == "drop_outlier_rows":
+        return act.get("method", "iqr") in OUTLIER_METHODS
+
+    if action_type == "cap_outliers":
+        lo = act.get("lower_percentile", 1)
+        hi = act.get("upper_percentile", 99)
+        try:
+            lo, hi = float(lo), float(hi)
+        except (TypeError, ValueError):
+            return False
+        return 0 <= lo < hi <= 100
+
+    return True
+
+
 def _parse_batch_actions(raw: str, expected_columns: list[str]) -> list[dict]:
     text = raw.strip()
     fence = re.search(r"```(?:json)?\s*(.*?)```", text, re.DOTALL)
@@ -309,6 +376,8 @@ def _parse_batch_actions(raw: str, expected_columns: list[str]) -> list[dict]:
             continue
         col = act.get("column")
         if not col or col not in expected or col in seen:
+            continue
+        if not _valid_action_fields(act):
             continue
         seen.add(col)
         aid = str(act.get("id", col))
@@ -362,38 +431,74 @@ Requirements:
 """
 
 
+def _run_ai_batch(
+    df: pd.DataFrame,
+    batch_cols: list[str],
+    profiles: dict[str, dict],
+    batch_index: int,
+    batch_total: int,
+) -> list[dict] | None:
+    """One Ollama call for a column batch. None when the call itself fails."""
+    prompt = _build_batch_prompt(df, batch_cols, profiles, batch_index, batch_total)
+    try:
+        response = ollama.chat(
+            model=MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            options={
+                "temperature": 0.2,
+                "num_predict": CLEANING_NUM_PREDICT_PER_BATCH,
+            },
+        )
+    except Exception:
+        return None
+    raw = response["message"]["content"].strip()
+    return _parse_batch_actions(raw, batch_cols)
+
+
 def _ai_analyze_column_batches(
     df: pd.DataFrame,
     profiles: dict[str, dict],
-) -> list[dict]:
-    columns = list(df.columns)
+    columns: list[str] | None = None,
+) -> dict:
+    """
+    Batched AI analysis with retries.
+    Failed calls are retried once; partially answered batches get one
+    smaller follow-up batch for the missing columns.
+    Returns {"actions": [...], "failed_batches": int, "total_batches": int}.
+    """
+    columns = list(df.columns) if columns is None else columns
     if not columns:
-        return []
+        return {"actions": [], "failed_batches": 0, "total_batches": 0}
 
     batches = [
         columns[i : i + CLEANING_BATCH_SIZE]
         for i in range(0, len(columns), CLEANING_BATCH_SIZE)
     ]
     all_actions: list[dict] = []
+    failed = 0
 
     for idx, batch_cols in enumerate(batches):
-        prompt = _build_batch_prompt(df, batch_cols, profiles, idx, len(batches))
-        try:
-            response = ollama.chat(
-                model=MODEL,
-                messages=[{"role": "user", "content": prompt}],
-                options={
-                    "temperature": 0.2,
-                    "num_predict": CLEANING_NUM_PREDICT_PER_BATCH,
-                },
-            )
-            raw = response["message"]["content"].strip()
-            batch_actions = _parse_batch_actions(raw, batch_cols)
-            all_actions.extend(batch_actions)
-        except Exception:
+        actions = _run_ai_batch(df, batch_cols, profiles, idx, len(batches))
+        if actions is None:
+            actions = _run_ai_batch(df, batch_cols, profiles, idx, len(batches))
+        if actions is None:
+            failed += 1
             continue
 
-    return all_actions
+        covered = {a["column"] for a in actions}
+        missing = [c for c in batch_cols if c not in covered]
+        if missing and len(missing) < len(batch_cols):
+            extra = _run_ai_batch(df, missing, profiles, idx, len(batches))
+            if extra:
+                actions.extend(extra)
+
+        all_actions.extend(actions)
+
+    return {
+        "actions": all_actions,
+        "failed_batches": failed,
+        "total_batches": len(batches),
+    }
 
 
 def dataset_level_actions(df: pd.DataFrame) -> list[dict]:
@@ -424,21 +529,54 @@ def build_per_column_proposal(
     """
     Analyze every column and return one recommendation per column (no action cap).
     Uses batched AI when use_ai=True; fills gaps with heuristics.
+    Each column action carries "source": "ai" or "heuristic".
     """
+    # Parse numeric-like text first so profiles and outlier checks see real numbers.
+    df = coerce_numeric_like_columns(df)
+
     profiles = {col: column_profile(df, col) for col in df.columns}
     actions: list[dict] = dataset_level_actions(df)
-    ai_by_col: dict[str, dict] = {}
 
+    # Deterministic structural rules take precedence — no AI needed.
+    forced: dict[str, dict] = {}
+    dupes = duplicate_columns(df)
+    for col in df.columns:
+        if is_junk_index_column(df, col):
+            forced[col] = {
+                "id": col,
+                "column": col,
+                "type": "drop_column",
+                "source": "heuristic",
+                "reason": f"Column `{col}`: junk index column (row numbers from export)",
+            }
+        elif col in dupes:
+            forced[col] = {
+                "id": col,
+                "column": col,
+                "type": "drop_column",
+                "source": "heuristic",
+                "reason": f"Column `{col}`: exact duplicate of `{dupes[col]}`",
+            }
+
+    ai_by_col: dict[str, dict] = {}
+    failed_batches = 0
+    total_batches = 0
     if use_ai and df.shape[1] > 0:
-        for act in _ai_analyze_column_batches(df, profiles):
-            ai_by_col[act["column"]] = act
+        ai_cols = [c for c in df.columns if c not in forced]
+        outcome = _ai_analyze_column_batches(df, profiles, ai_cols)
+        failed_batches = outcome["failed_batches"]
+        total_batches = outcome["total_batches"]
+        for act in outcome["actions"]:
+            ai_by_col[act["column"]] = {**act, "source": "ai"}
 
     issue_count = 0
     for col in df.columns:
-        if col in ai_by_col:
+        if col in forced:
+            action = forced[col]
+        elif col in ai_by_col:
             action = ai_by_col[col]
         else:
-            action = heuristic_column_action(df, col, profiles[col])
+            action = {**heuristic_column_action(df, col, profiles[col]), "source": "heuristic"}
         if action.get("type") != "skip":
             issue_count += 1
         actions.append(action)
@@ -452,4 +590,10 @@ def build_per_column_proposal(
     if use_ai:
         summary += f" AI analyzed {ai_count} column(s) in batches; heuristics cover the rest."
 
-    return {"summary": summary, "actions": actions}
+    return {
+        "summary": summary,
+        "actions": actions,
+        "ai_columns": ai_count,
+        "ai_failed_batches": failed_batches,
+        "ai_total_batches": total_batches,
+    }

@@ -15,15 +15,17 @@ from athena.ui import (
     render_main,
     render_sidebar,
 )
+from athena.ui.branding import inject_meta_tags
 
 st.set_page_config(
-    page_title="Athena",
-    page_icon="◆",
+    page_title="athena",
+    page_icon="static/favicon.png",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
 inject_styles()
+inject_meta_tags()
 init_session_state()
 render_sidebar()
 

@@ -2,6 +2,7 @@ import ollama
 import pandas as pd
 import streamlit as st
 
+from athena.config import MODEL
 from athena.llm import build_schema_string, generate_chart_suggestions, generate_suggested_questions
 from athena.llm.schema import coerce_numeric_like_columns
 
@@ -12,10 +13,56 @@ def add_to_llm_history(role: str, content: str, max_turns: int = 6) -> None:
         st.session_state.llm_history = st.session_state.llm_history[-(max_turns * 2) :]
 
 
+def format_result_preview(result, max_rows: int = 5, max_chars: int = 600) -> str:
+    """Compact text preview of a query result for LLM chat history."""
+    if isinstance(result, pd.DataFrame):
+        shape = f"{result.shape[0]} rows × {result.shape[1]} cols"
+        preview = result.head(max_rows).to_string(index=False)
+    elif isinstance(result, pd.Series):
+        shape = f"series with {len(result)} values"
+        preview = result.head(max_rows).to_string()
+    else:
+        return f"Result: {result}"
+    if len(preview) > max_chars:
+        preview = preview[:max_chars] + "…"
+    return f"Result ({shape}):\n{preview}"
+
+
+def build_assistant_history_entry(
+    code: str | None,
+    result=None,
+    error: str | None = None,
+    narrative: str | None = None,
+    plan_summary: str | None = None,
+) -> str:
+    """
+    Assistant turn for LLM history: code plus what actually happened
+    (result preview / narrative on success, error on failure) so
+    follow-up questions have real context.
+    """
+    parts: list[str] = []
+    if code:
+        parts.append(f"```python\n{code}\n```")
+    if error:
+        first_line = error.strip().splitlines()[-1][:300]
+        parts.append(f"This code FAILED with error: {first_line}")
+        parts.append("Do not repeat this mistake in follow-up answers.")
+        return "\n".join(parts)
+    if plan_summary:
+        parts.append(f"Columns used: {plan_summary}")
+    if result is not None:
+        parts.append(format_result_preview(result))
+    if narrative:
+        parts.append(f"Insight: {narrative}")
+    return "\n".join(parts) if parts else "(no output)"
+
+
 def check_ollama() -> bool:
+    """Return True if Ollama is reachable and the configured model is available."""
     try:
         models = [m["model"] for m in ollama.list()["models"]]
-        return any("qwen2.5-coder" in m for m in models)
+        target = MODEL.split(":")[0]
+        return any(target in m for m in models)
     except Exception:
         return False
 

@@ -3,14 +3,15 @@ import streamlit as st
 
 from athena.llm import generate_and_run, summarise_result
 from athena.ui.charts import try_make_chart
-from athena.ui.helpers import add_to_llm_history
+from athena.ui.helpers import add_to_llm_history, build_assistant_history_entry
 
 
 def render_landing() -> None:
     st.markdown(
         """
         <div class="landing-hero">
-            <h1>Talk to your data</h1>
+            <p class="hero-kicker">Local · Private · No API keys</p>
+            <h1>Talk to <em>your data</em></h1>
             <p>Upload any CSV and ask questions in plain English.
             Athena writes the pandas code, runs it locally, and explains what it found.</p>
         </div>
@@ -125,7 +126,21 @@ def _handle_question(question: str) -> None:
         if error:
             st.error(error)
             msg_data["error"] = error
+            if code:
+                with st.expander("View generated code"):
+                    st.code(code, language="python")
+            add_to_llm_history("user", question)
+            add_to_llm_history(
+                "assistant",
+                build_assistant_history_entry(code, error=error),
+            )
         else:
+            if output.get("result_warning"):
+                st.warning(
+                    "This answer may be unreliable: "
+                    f"{output['result_warning']} "
+                    "Try rephrasing with the exact value from your data."
+                )
             narrative = summarise_result(question, result)
             st.markdown(
                 f'<div class="insight-box">{narrative}</div>',
@@ -161,7 +176,15 @@ def _handle_question(question: str) -> None:
                     st.code(code, language="python")
 
             add_to_llm_history("user", question)
-            add_to_llm_history("assistant", f"```python\n{code}\n```")
+            add_to_llm_history(
+                "assistant",
+                build_assistant_history_entry(
+                    code,
+                    result=result,
+                    narrative=narrative,
+                    plan_summary=output.get("plan_summary"),
+                ),
+            )
 
         st.session_state.messages.append(msg_data)
 

@@ -68,7 +68,9 @@ def test_build_chart_from_spec_bar():
     assert len(plot_df) == 5
     fig = build_chart_from_spec(df, spec)
     assert fig is not None
-    assert fig.layout.paper_bgcolor == "#14161c"
+    from athena.ui.charts import PLOTLY_THEME
+
+    assert fig.layout.paper_bgcolor == PLOTLY_THEME["paper_bgcolor"]
 
 
 def test_response_id_not_suggested():

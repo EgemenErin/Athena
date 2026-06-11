@@ -9,6 +9,7 @@ from athena.config import (
 )
 from athena.llm.agents import (
     build_analyst_user_message,
+    deterministic_review,
     plan_analysis,
     review_result,
 )
@@ -23,7 +24,11 @@ def _chat_codegen(
     df: pd.DataFrame,
 ) -> tuple[str | None, str | None, object, str | None]:
     """Run model, extract code, execute. Returns (code, result, error, raw)."""
-    response = ollama.chat(model=MODEL, messages=messages)
+    response = ollama.chat(
+        model=MODEL,
+        messages=messages,
+        options={"temperature": 0.1},
+    )
     raw = response["message"]["content"]
     code = extract_code(raw)
 
@@ -45,7 +50,7 @@ def generate_and_run(
 
     Optional agent pipeline: Planner → Analyst (code) → Reviewer (one retry).
     """
-    system_prompt = build_system_prompt(schema)
+    system_prompt = build_system_prompt(schema, df)
     history = chat_history or []
     numeric_hint = ", ".join(numeric_columns(df)[:12]) or "none"
     categorical_hint = ", ".join(categorical_columns(df)[:12]) or "none"
@@ -70,7 +75,7 @@ def generate_and_run(
                 "role": "user",
                 "content": (
                     f"That code raised an error:\n\n{error}\n\n"
-                    "Fix it and return only the corrected ```python block.\n\n"
+                    'Fix it and return only corrected code as {"code": "..."} JSON.\n\n'
                     "Important constraints:\n"
                     f"- Numeric columns likely to aggregate: {numeric_hint}\n"
                     f"- Non-numeric/grouping columns: {categorical_hint}\n"
@@ -100,7 +105,7 @@ def generate_and_run(
                     "content": (
                         f"Reviewer: the result does not answer the question.\n\n"
                         f"{review['feedback']}\n\n"
-                        "Return only a corrected ```python block that fixes this."
+                        'Return only corrected code as {"code": "..."} JSON that fixes this.'
                     ),
                 },
             ]
@@ -110,6 +115,14 @@ def generate_and_run(
 
     if error:
         error = friendly_execution_error(error, df)
+
+    # Final rule check: if the answer still looks wrong after retries,
+    # tell the UI so the user is not misled by a NaN/empty "result".
+    result_warning = None
+    if not error and code:
+        final_verdict = deterministic_review(question, plan, result)
+        if not final_verdict["ok"]:
+            result_warning = final_verdict["feedback"]
 
     plan_summary = None
     if plan and plan.get("columns"):
@@ -123,6 +136,7 @@ def generate_and_run(
         "plan": plan,
         "plan_summary": plan_summary,
         "review_feedback": review_feedback,
+        "result_warning": result_warning,
     }
 
 
