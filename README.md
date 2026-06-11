@@ -5,7 +5,7 @@
 [![Streamlit](https://img.shields.io/badge/Streamlit-1.58+-FF4B4B?logo=streamlit&logoColor=white)](https://streamlit.io/)
 [![Ollama](https://img.shields.io/badge/Ollama-local-black)](https://ollama.com/)
 
-> **Talk to your data** — upload any CSV, ask questions in plain English, and get tables, charts, and narrative insights. Everything runs locally on your machine via [Ollama](https://ollama.com/); your data never leaves your device.
+> **Talk to your data** — upload any CSV, ask questions in plain English, and get tables, charts, and narrative insights. Everything runs on your machine via [Ollama](https://ollama.com/); your data never leaves your device.
 
 Repository: [github.com/EgemenErin/Athena](https://github.com/EgemenErin/Athena)
 
@@ -15,24 +15,22 @@ Repository: [github.com/EgemenErin/Athena](https://github.com/EgemenErin/Athena)
 
 **Athena** is a universal CSV data assistant built for analysts, researchers, and anyone who works with tabular exports but does not want to write pandas by hand. Upload a spreadsheet, describe what you want to know in natural language, and Athena generates safe pandas code, executes it in a sandbox, visualizes the result when appropriate, and summarizes the finding in plain English.
 
-The project exists to close the gap between “I have a CSV” and “I have an answer” without cloud APIs, API keys, or sending sensitive data to third-party services.
+Athena is designed to run **locally on your machine**. It talks to Ollama on the same computer — no commercial LLM API keys, no cloud hosting, and no sending sensitive CSVs to third-party services.
 
 ---
-
 
 <img width="1851" height="931" alt="image" src="https://github.com/user-attachments/assets/c53af162-80f1-4367-8674-1d7377cd57d3" />
 <img width="1842" height="938" alt="image" src="https://github.com/user-attachments/assets/b548235a-9835-42f3-adcc-b79ed26417d4" />
 <img width="1853" height="933" alt="image" src="https://github.com/user-attachments/assets/30ec7ea1-a79f-4153-bf3f-3fbd8f23bfb6" />
 
-
 ## ✨ Features
 
 - **Natural-language queries** — Ask questions like “What is the average salary by country?” and get executable pandas code plus results.
-- **Local-first privacy** — Powered by Ollama (`qwen2.5-coder:7b` by default); no external LLM API required.
-- **Sandboxed execution** — Generated code runs in an isolated scope with only `df` and `pd` available.
+- **Local-first privacy** — Powered by Ollama (`qwen2.5-coder:14b` by default); no external LLM API required.
+- **Sandboxed execution** — Generated code runs in an isolated scope with only `df` and `pd` available; imports, file I/O, and system modules are blocked.
 - **Smart recovery** — Automatic retry with schema-aware hints when generated code fails.
 - **Senior analyst prompts** — Code generation follows strict column mapping, question-type rules, and survey-style data patterns (semicolon lists, filters).
-- **Agent pipeline (local)** — Optional Planner → Analyst → Reviewer flow for better answers; toggle in `athena/config.py`.
+- **Agent pipeline** — Optional Planner → Analyst → Reviewer flow for better answers; toggle in `athena/config.py`.
 - **AI-suggested questions** — Business-analyst-style sidebar prompts tied to real columns.
 - **Dashboard** — AI-suggested graphs (bar, histogram, scatter, line, pie) with live Plotly previews; **Make a chart** builder with column pickers and heuristic chart suggestions; save charts to **My charts**; export saved charts to PDF (2×2 per page). Handles numeric text (coerce), high-cardinality metrics (bins), and list-like columns (explode `;`-separated values).
 - **Rich responses** — DataFrames, scalar metrics, Plotly bar charts (only when appropriate), and grounded narrative insights.
@@ -48,36 +46,46 @@ The project exists to close the gap between “I have a CSV” and “I have an 
 | **UI** | [Streamlit](https://streamlit.io/) |
 | **Data** | [pandas](https://pandas.pydata.org/) |
 | **Charts** | [Plotly Express](https://plotly.com/python/plotly-express/) |
-| **LLM runtime** | [Ollama](https://ollama.com/) + `qwen2.5-coder:7b` |
+| **LLM runtime** | [Ollama](https://ollama.com/) + `qwen2.5-coder:14b` (default) |
 | **Language** | Python 3.10+ |
 
 **Project layout**
 
 ```
 Athena/
-├── app.py                 # Streamlit entry point
+├── app.py                      # Streamlit entry point
 ├── requirements.txt
+├── requirements-dev.txt
+├── .streamlit/
+│   └── config.toml
+├── static/                     # Logos, favicon, OG image
+├── demo/
+│   └── demo.csv
 ├── athena/
-│   ├── config.py          # Model name, retry limits
-│   ├── llm/               # Ollama prompts, sandbox, suggestions
+│   ├── config.py               # Model (env), retry limits, agent toggle
+│   ├── charts/                 # Chart constants and aggregations
+│   ├── llm/                    # Ollama prompts, sandbox, suggestions
 │   │   ├── schema.py
 │   │   ├── execution.py
 │   │   ├── generator.py
 │   │   ├── suggestions.py
 │   │   ├── chart_suggestions.py
 │   │   ├── cleaning.py
+│   │   ├── cleaning_columns.py
 │   │   ├── agents.py
 │   │   ├── personas.py
 │   │   └── summary.py
-│   └── ui/                # Styles, sidebar, chat views
+│   └── ui/                     # Styles, sidebar, chat, dashboard, cleaning
 │       ├── styles.py
 │       ├── sidebar.py
+│       ├── main.py
 │       ├── cleaning.py
 │       ├── dashboard.py
+│       ├── charts.py
 │       ├── pdf_export.py
-│       └── main.py
+│       ├── branding.py
+│       └── helpers.py
 ├── tests/
-│   └── test_cleaning.py
 └── README.md
 ```
 
@@ -96,7 +104,7 @@ Before you begin, install:
 Pull the default model (required on first run):
 
 ```bash
-ollama pull qwen2.5-coder:7b
+ollama pull qwen2.5-coder:14b
 ```
 
 Verify Ollama is running:
@@ -105,7 +113,7 @@ Verify Ollama is running:
 ollama list
 ```
 
-You should see `qwen2.5-coder:7b` (or a variant containing `qwen2.5-coder`) in the list.
+You should see `qwen2.5-coder:14b` (or a variant whose name contains `qwen2.5-coder`) in the list.
 
 ### Installation
 
@@ -127,26 +135,20 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
-### Environment variables
+### Configuration
 
-Athena does **not** require a `.env` file out of the box. Configuration is in code:
-
-| Variable / setting | Location | Description |
-|--------------------|----------|-------------|
-| `MODEL` | `athena/config.py` | Ollama model name (default: `qwen2.5-coder:7b`) |
+| Variable / setting | Where | Description |
+|--------------------|-------|-------------|
+| `OLLAMA_MODEL` | Environment variable | Ollama model name (default: `qwen2.5-coder:14b`) |
+| `OLLAMA_HOST` | Environment variable | Ollama API URL if not the default `http://127.0.0.1:11434` |
 | `MAX_RETRIES` | `athena/config.py` | Automatic fix attempts on execution errors (default: `1`) |
 | `ENABLE_AGENT_PIPELINE` | `athena/config.py` | Planner + Reviewer before/after codegen (default: `True`) |
 | `MAX_REVIEW_RETRIES` | `athena/config.py` | Reviewer-driven codegen retries when result mismatches question (default: `1`) |
+| `CLEANING_BATCH_SIZE` | `athena/config.py` | Columns per cleaning LLM batch (default: `30`) |
 
-Optional future additions (placeholders if you extend the project):
+**Changing the model** — set `OLLAMA_MODEL` (recommended) or edit the default in [`athena/config.py`](athena/config.py). Pull the model locally (`ollama pull <name>`). The sidebar status pill checks that a model whose name contains the configured base tag (e.g. `qwen2.5-coder`) is available.
 
-```env
-# .env.example (not required today)
-OLLAMA_HOST=http://127.0.0.1:11434
-OLLAMA_MODEL=qwen2.5-coder:7b
-```
-
-Ollama’s host can also be set via the standard `OLLAMA_HOST` environment variable supported by the Ollama CLI.
+Ollama also respects the standard `OLLAMA_HOST` environment variable used by the Ollama CLI.
 
 ### Run the app
 
@@ -170,8 +172,10 @@ Cleaning executor smoke test (no Ollama):
 
 ```bash
 python -m athena.llm.cleaning
-pytest tests/test_cleaning.py
+pytest tests/
 ```
+
+Install dev dependencies first: `pip install -r requirements-dev.txt`.
 
 ---
 
@@ -238,16 +242,6 @@ else:
     print(summarise_result("How many unique customers are there?", output["result"]))
 ```
 
-### Changing the model
-
-Edit the model constant in `athena/config.py`:
-
-```python
-MODEL = "qwen2.5-coder:7b"  # or another Ollama model you have pulled
-```
-
-Ensure the model is pulled (`ollama pull <name>`) and that `check_ollama()` in `athena/ui/helpers.py` can find a `qwen2.5-coder` variant, or update that check to match your model name.
-
 ---
 
 ## 🤝 Contributing
@@ -256,7 +250,7 @@ Contributions are welcome. To keep changes easy to review:
 
 1. **Fork** the repository and create a branch from `main`.
 2. **Describe** your change in the PR (bug fix, feature, docs).
-3. **Test locally** — run `streamlit run app.py` and, when touching the engine, `python -m athena.llm.generator`.
+3. **Test locally** — run `streamlit run app.py` and, when touching the engine, `python -m athena.llm.generator` and `pytest tests/`.
 4. **Keep scope focused** — one logical change per PR when possible.
 5. **Match style** — follow existing patterns under `athena/`; avoid unrelated refactors.
 
@@ -266,9 +260,7 @@ Please open an issue first for large features (new chart types, alternate LLM ba
 
 ## 📄 License
 
-This project is licensed under the **MIT License** — see the [LICENSE](LICENSE) file for details.
-
-> If `LICENSE` is not yet in the repo, add one or replace this section with your chosen license (e.g. Apache 2.0, GPLv3).
+This project is licensed under the **MIT License**. A `LICENSE` file may be added to the repository separately; until then, the MIT terms at [opensource.org/licenses/MIT](https://opensource.org/licenses/MIT) apply.
 
 ---
 
