@@ -17,11 +17,6 @@ Repository: [github.com/EgemenErin/Athena](https://github.com/EgemenErin/Athena)
 
 Athena is designed to run **locally on your machine**. It talks to Ollama on the same computer — no commercial LLM API keys, no cloud hosting, and no sending sensitive CSVs to third-party services.
 
----
-
-<img width="1851" height="931" alt="image" src="https://github.com/user-attachments/assets/c53af162-80f1-4367-8674-1d7377cd57d3" />
-<img width="1842" height="938" alt="image" src="https://github.com/user-attachments/assets/b548235a-9835-42f3-adcc-b79ed26417d4" />
-<img width="1853" height="933" alt="image" src="https://github.com/user-attachments/assets/30ec7ea1-a79f-4153-bf3f-3fbd8f23bfb6" />
 
 ## ✨ Features
 
