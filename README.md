@@ -255,7 +255,7 @@ Please open an issue first for large features (new chart types, alternate LLM ba
 
 ## 📄 License
 
-This project is licensed under the **MIT License**. A `LICENSE` file may be added to the repository separately; until then, the MIT terms at [opensource.org/licenses/MIT](https://opensource.org/licenses/MIT) apply.
+This project is licensed under the **MIT License**. 
 
 ---
 
